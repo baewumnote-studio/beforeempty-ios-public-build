@@ -20,6 +20,12 @@ CONFIG={'app_store_id':'6820955432','bundle':'com.baewumnote.beforeempty','build
         'admob_app_id':'public-fixture','team':'TEAMFIXTUR'}
 
 class ReleaseSecurityTests(unittest.TestCase):
+    def test_screenshot_mode_refuses_apple_upload_before_accessing_credentials(self):
+        with patch.object(run_build,'DELIVER',True,create=True),patch.object(private_backup,'verify_destination') as destination,patch.object(run_build,'select_xcode') as xcode:
+            with self.assertRaises(ValueError): run_build.capture_screenshots()
+            destination.assert_not_called()
+            xcode.assert_not_called()
+
     def test_dependencies_do_not_receive_signing_decryption_or_upload_secrets(self):
         with tempfile.TemporaryDirectory() as temp:
             app=Path(temp); (app/'release').mkdir()

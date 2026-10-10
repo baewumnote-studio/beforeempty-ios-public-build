@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import traceback
 import zipfile
 from sealed_io import extract_zip, key_from_env, seal, unseal
@@ -79,8 +80,8 @@ def preflight():
     run(['flutter','analyze','--no-pub'],'app-analysis')
     run(['flutter','test','--no-pub','--dart-define=ADMOB_USE_TEST_ADS=true'],'app-tests')
 
-def build_ios():
-    global PROFILE_UUID,KEYCHAIN,STAGE
+def select_xcode():
+    global STAGE
     STAGE='select-xcode'
     candidates=sorted(Path('/Applications').glob('Xcode*.app/Contents/Developer'))
     for candidate in candidates:
@@ -89,6 +90,10 @@ def build_ios():
         if version.splitlines()[0]=='Xcode 26.6':
             ENV['DEVELOPER_DIR']=str(candidate); break
     else: raise RuntimeError('Required verified Xcode unavailable.')
+
+def build_ios():
+    global PROFILE_UUID,KEYCHAIN,STAGE
+    select_xcode()
     run([sys.executable,'release/check_source.py'],'reviewed-source')
     run([sys.executable,'release/appstore_signing.py','preflight'],'real-appstore-signing',env=signing_env())
     setup_flutter()
@@ -143,6 +148,64 @@ def build_ios():
         tar.add(archives[0],arcname=archives[0].name)
     retain_and_upload(ipas[0])
 
+
+def capture_screenshots():
+    global SIMULATOR_UUID,STAGE,BACKUP_ID
+    if DELIVER: raise ValueError('Screenshot capture cannot upload a device app.')
+    private_backup.verify_destination()
+    select_xcode()
+    run([sys.executable,'release/check_source.py'],'reviewed-source')
+    setup_flutter()
+    run([sys.executable,'tool/configure_ios.py'],'screenshot-ios-configuration')
+    # Use an installed medium Dynamic Island device at its native pixel size.
+    devices=json.loads(subprocess.run(['xcrun','simctl','list','devices','available','--json'],
+        env=ENV,capture_output=True,text=True,check=True).stdout)['devices']
+    candidates=[(runtime,device) for runtime,group in devices.items() if '.iOS-' in runtime
+        for device in group if device.get('isAvailable') and device['name'] in ('iPhone 17 Pro','iPhone 16 Pro','iPhone 15 Pro')]
+    if not candidates: raise ValueError('Supported installed iPhone Simulator unavailable.')
+    runtime,device=sorted(candidates,key=lambda item:(item[1]['name'],item[0]),reverse=True)[0]
+    device_type=device['deviceTypeIdentifier']
+    SIMULATOR_UUID=subprocess.run(['xcrun','simctl','create','BeforeEmptyScreenshots',device_type,runtime],
+        env=ENV,capture_output=True,text=True,check=True).stdout.strip()
+    run(['xcrun','simctl','boot',SIMULATOR_UUID],'boot-screenshot-device')
+    run(['xcrun','simctl','bootstatus',SIMULATOR_UUID,'-b'],'wait-for-screenshot-device')
+    run(['xcrun','simctl','status_bar',SIMULATOR_UUID,'override','--time','9:41','--dataNetwork','wifi',
+        '--wifiMode','active','--wifiBars','3','--batteryState','charged','--batteryLevel','100'],'screenshot-status-bar')
+    index=[]
+    for locale in ('en','ko'):
+        for position,scene in enumerate(('home','detail','history'),1):
+            label=locale+'-'+scene
+            run(['flutter','build','ios','--simulator','--debug','--no-pub','--no-codesign',
+                '--dart-define=SCREENSHOT_MODE=true','--dart-define=SCREENSHOT_LOCALE='+locale,
+                '--dart-define=SCREENSHOT_SCENE='+scene,'--dart-define=SCREENSHOT_THEME=light',
+                '--dart-define=ADMOB_USE_TEST_ADS=true'],'simulator-compile-'+label)
+            app=APP/'build/ios/iphonesimulator/Runner.app'
+            if not app.is_dir(): raise ValueError('Compiled native Simulator app missing.')
+            if index:
+                run(['xcrun','simctl','terminate',SIMULATOR_UUID,CONFIG['bundle']],'terminate-'+label)
+            run(['xcrun','simctl','install',SIMULATOR_UUID,str(app)],'install-'+label)
+            run(['xcrun','simctl','launch',SIMULATOR_UUID,CONFIG['bundle']],'launch-'+label)
+            # Let the native launch, SQLite seed and first frame settle before capture.
+            time.sleep(8)
+            raw=PRIVATE/(label+'.png')
+            folder=OUTPUT/'screenshots'/locale
+            folder.mkdir(parents=True,exist_ok=True)
+            target=folder/(str(position).zfill(2)+'-'+scene+'.jpg')
+            run(['xcrun','simctl','io',SIMULATOR_UUID,'screenshot',str(raw)],'capture-'+label)
+            run(['sips','-s','format','jpeg','-s','formatOptions','100',str(raw),'--out',str(target)],'opaque-native-image-'+label)
+            dimensions=subprocess.run(['sips','-g','pixelWidth','-g','pixelHeight',str(target)],
+                env=ENV,capture_output=True,text=True,check=True).stdout
+            size=tuple(int(line.split(':',1)[1].strip()) for line in dimensions.splitlines() if 'pixelWidth:' in line or 'pixelHeight:' in line)
+            if size not in ((1179,2556),(1206,2622)): raise ValueError('Screenshot must have accepted native medium-display dimensions.')
+            index.append({'locale':locale,'scene':scene,'file':target.relative_to(OUTPUT).as_posix(),
+                'size':size,'sha256':hashlib.sha256(target.read_bytes()).hexdigest(),'nativeSimulator':True})
+    (OUTPUT/'screenshots/capture-index.json').write_text(json.dumps({'deviceName':device['name'],
+        'runtime':runtime,'sourceSha256':MANIFEST['source_sha256'],'screenshots':index},indent=2))
+    STAGE='private-screenshot-backup'
+    BACKUP_ID=private_backup.create_release(MODE)
+    private_backup.store(BACKUP_ID,'binaries',[OUTPUT],KEY)
+    print('PASS: six-native-english-korean-screenshots-retained-privately',flush=True)
+
 def retain_and_upload(ipa):
     global STAGE,BACKUP_ID
     STAGE='private-binary-backup'
@@ -154,6 +217,9 @@ def retain_and_upload(ipa):
     apple_delivery.upload(ipa,CONFIG,PRIVATE,run,ENV)
 
 def cleanup():
+    if SIMULATOR_UUID:
+        subprocess.run(['xcrun','simctl','shutdown',SIMULATOR_UUID],env=ENV,capture_output=True)
+        subprocess.run(['xcrun','simctl','delete',SIMULATOR_UUID],env=ENV,capture_output=True)
     if KEYCHAIN and KEYCHAIN.exists():
         subprocess.run(['security','default-keychain','-d','user','-s',str(Path.home()/'Library/Keychains/login.keychain-db')],capture_output=True)
         subprocess.run(['security','delete-keychain',str(KEYCHAIN)],capture_output=True)
@@ -167,8 +233,8 @@ def cleanup():
         shutil.rmtree(PRIVATE)
 
 def main():
-    global TEMP,PRIVATE,APP,LOGS,OUTPUT,ENV,CONFIG,PROFILE_UUID,KEYCHAIN,MANIFEST,KEY,BACKUP_ID,DELIVER,STAGE
-    if (MODE not in ('preflight','ios') or os.environ.get('GITHUB_ACTIONS')!='true'
+    global TEMP,PRIVATE,APP,LOGS,OUTPUT,ENV,CONFIG,PROFILE_UUID,KEYCHAIN,SIMULATOR_UUID,MANIFEST,KEY,BACKUP_ID,DELIVER,STAGE
+    if (MODE not in ('preflight','ios','screenshots') or os.environ.get('GITHUB_ACTIONS')!='true'
             or os.environ.get('GITHUB_REPOSITORY')!='baewumnote-studio/beforeempty-ios-public-build'
             or os.environ.get('GITHUB_REF')!='refs/heads/main'
             or os.environ.get('GITHUB_EVENT_NAME')!='workflow_dispatch'
@@ -185,11 +251,11 @@ def main():
     if PRIVATE.exists(): raise ValueError('Private workspace must start empty.')
     APP=PRIVATE/'app'; LOGS=PRIVATE/'diagnostics'; OUTPUT=PRIVATE/'output'
     LOGS.mkdir(parents=True); OUTPUT.mkdir()
-    PROFILE_UUID=None; KEYCHAIN=None; BACKUP_ID=None; success=False
+    PROFILE_UUID=None; KEYCHAIN=None; SIMULATOR_UUID=None; BACKUP_ID=None; success=False
     try:
         extract_zip(unseal(source,KEY),PRIVATE)
         ENV,CONFIG=configure_environment()
-        (preflight if MODE=='preflight' else build_ios)()
+        {'preflight':preflight,'ios':build_ios,'screenshots':capture_screenshots}[MODE]()
         success=True
     except Exception:
         (LOGS/'failure.txt').write_text(traceback.format_exc())

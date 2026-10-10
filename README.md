@@ -42,3 +42,11 @@ contains only generic stage results. Build/backup/upload failures are distinct;
 Apple processing and actual iPhone QA still need separate confirmation.
 
 App Store review submission requires a separate final approval.
+
+For store images, manually choose `screenshots_only: true` and `upload_app: false`.
+This separate standard macOS job compiles the preserved app for an installed
+iPhone Simulator in its existing deterministic screenshot mode, captures home,
+item detail and history in English and Korean, and keeps the opaque native-sized
+images encrypted in a private draft release. It receives only the source and
+private-backup secrets; no signing certificate or Apple upload key is passed to
+that job. These images are reviewed locally before uploading to App Store Connect.

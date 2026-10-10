@@ -41,7 +41,7 @@ def create_release(mode):
     verify_destination()
     run=os.environ.get('GITHUB_RUN_ID','')
     attempt=os.environ.get('GITHUB_RUN_ATTEMPT','')
-    if mode not in ('preflight','ios') or not re.fullmatch(r'[1-9][0-9]*',run) or not re.fullmatch(r'[1-9][0-9]*',attempt):
+    if mode not in ('preflight','ios','screenshots') or not re.fullmatch(r'[1-9][0-9]*',run) or not re.fullmatch(r'[1-9][0-9]*',attempt):
         raise ValueError('Exact manual run identity required.')
     # A draft release does not publish a tag or alter the existing main branch.
     value=request('/releases',{'tag_name':'beforeempty-store-'+run+'-'+attempt+'-'+mode,

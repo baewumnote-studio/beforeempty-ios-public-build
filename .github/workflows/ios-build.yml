@@ -7,14 +7,19 @@ on:
         required: true
         type: boolean
         default: false
+      screenshots_only:
+        description: Capture native iPhone Simulator screenshots privately; no device signing or Apple upload
+        required: true
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
-  group: beforeempty-public-store
+  group: beforeempty-public-${{ inputs.screenshots_only && 'screenshots' || 'store' }}
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'baewumnote-studio/beforeempty-ios-public-build' && github.repository_owner_id == '337203413' && github.ref == 'refs/heads/main' && !github.event.repository.private
+    if: github.repository == 'baewumnote-studio/beforeempty-ios-public-build' && github.repository_owner_id == '337203413' && github.ref == 'refs/heads/main' && !github.event.repository.private && !inputs.screenshots_only
     runs-on: ubuntu-latest
     environment: beforeempty-store
     timeout-minutes: 20
@@ -45,7 +50,7 @@ jobs:
         run: python scripts/run_build.py preflight
   ios:
     needs: preflight
-    if: github.repository == 'baewumnote-studio/beforeempty-ios-public-build' && github.repository_owner_id == '337203413' && github.ref == 'refs/heads/main' && !github.event.repository.private
+    if: github.repository == 'baewumnote-studio/beforeempty-ios-public-build' && github.repository_owner_id == '337203413' && github.ref == 'refs/heads/main' && !github.event.repository.private && !inputs.screenshots_only
     runs-on: macos-26
     environment: beforeempty-store
     timeout-minutes: 45
@@ -72,3 +77,27 @@ jobs:
           UPLOAD_APP: ${{ inputs.upload_app }}
           REPOSITORY_IS_PUBLIC: ${{ !github.event.repository.private }}
         run: python scripts/run_build.py ios
+  screenshots:
+    if: github.repository == 'baewumnote-studio/beforeempty-ios-public-build' && github.repository_owner_id == '337203413' && github.ref == 'refs/heads/main' && !github.event.repository.private && inputs.screenshots_only && !inputs.upload_app
+    runs-on: macos-26
+    environment: beforeempty-store
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install pinned hashed dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r requirements-ci.txt
+      - name: Verify confidentiality guards
+        run: python -m unittest discover -s scripts -p 'test_*.py'
+      - name: Capture existing native app screens and retain privately
+        env:
+          BUILD_INPUT_KEY: ${{ secrets.BUILD_INPUT_KEY }}
+          PRIVATE_BACKUP_TOKEN: ${{ secrets.PRIVATE_BACKUP_TOKEN }}
+          UPLOAD_APP: 'false'
+          REPOSITORY_IS_PUBLIC: ${{ !github.event.repository.private }}
+        run: python scripts/run_build.py screenshots
