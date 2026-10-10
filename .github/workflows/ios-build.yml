@@ -12,6 +12,16 @@ on:
         required: true
         type: boolean
         default: false
+      screenshot_locale:
+        description: Locale to capture when screenshots_only is selected
+        type: choice
+        default: all
+        options: [all, en, ko]
+      screenshot_scene:
+        description: Screen to capture when screenshots_only is selected
+        type: choice
+        default: all
+        options: [all, home, detail, history]
 permissions:
   contents: read
 concurrency:
@@ -96,6 +106,8 @@ jobs:
         run: python -m unittest discover -s scripts -p 'test_*.py'
       - name: Capture existing native app screens and retain privately
         env:
+          SCREENSHOT_LOCALE: ${{ inputs.screenshot_locale }}
+          SCREENSHOT_SCENE: ${{ inputs.screenshot_scene }}
           BUILD_INPUT_KEY: ${{ secrets.BUILD_INPUT_KEY }}
           PRIVATE_BACKUP_TOKEN: ${{ secrets.PRIVATE_BACKUP_TOKEN }}
           UPLOAD_APP: 'false'

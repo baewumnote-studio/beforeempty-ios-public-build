@@ -152,6 +152,10 @@ def build_ios():
 def capture_screenshots():
     global SIMULATOR_UUID,STAGE,BACKUP_ID
     if DELIVER: raise ValueError('Screenshot capture cannot upload a device app.')
+    chosen_locale=os.environ.get('SCREENSHOT_LOCALE','all')
+    chosen_scene=os.environ.get('SCREENSHOT_SCENE','all')
+    if chosen_locale not in ('all','en','ko') or chosen_scene not in ('all','home','detail','history'):
+        raise ValueError('Unknown capture selection.')
     private_backup.verify_destination()
     select_xcode()
     run([sys.executable,'release/check_source.py'],'reviewed-source')
@@ -173,7 +177,9 @@ def capture_screenshots():
         '--wifiMode','active','--wifiBars','3','--batteryState','charged','--batteryLevel','100'],'screenshot-status-bar')
     index=[]
     for locale in ('en','ko'):
+        if chosen_locale not in ('all',locale): continue
         for position,scene in enumerate(('home','detail','history'),1):
+            if chosen_scene not in ('all',scene): continue
             label=locale+'-'+scene
             run(['flutter','build','ios','--simulator','--debug','--no-pub','--no-codesign',
                 '--dart-define=SCREENSHOT_MODE=true','--dart-define=SCREENSHOT_LOCALE='+locale,
@@ -185,13 +191,34 @@ def capture_screenshots():
                 run(['xcrun','simctl','terminate',SIMULATOR_UUID,CONFIG['bundle']],'terminate-'+label)
             run(['xcrun','simctl','install',SIMULATOR_UUID,str(app)],'install-'+label)
             run(['xcrun','simctl','launch',SIMULATOR_UUID,CONFIG['bundle']],'launch-'+label)
-            # Let the native launch, SQLite seed and first frame settle before capture.
+            # Wait for rendered content rather than retaining a loading frame.
             time.sleep(8)
             raw=PRIVATE/(label+'.png')
             folder=OUTPUT/'screenshots'/locale
             folder.mkdir(parents=True,exist_ok=True)
             target=folder/(str(position).zfill(2)+'-'+scene+'.jpg')
-            run(['xcrun','simctl','io',SIMULATOR_UUID,'screenshot',str(raw)],'capture-'+label)
+            checker=PRIVATE/'check-rendered-image.swift'
+            checker.write_text('''import AppKit
+import Foundation
+guard let image = NSBitmapImageRep(contentsOfFile: CommandLine.arguments[1]) else { exit(2) }
+var dark = 0
+var total = 0
+for y in stride(from: Int(Double(image.pixelsHigh)*0.20), to: Int(Double(image.pixelsHigh)*0.95), by: 12) {
+    for x in stride(from: Int(Double(image.pixelsWide)*0.04), to: Int(Double(image.pixelsWide)*0.96), by: 12) {
+        guard let color = image.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { exit(2) }
+        total += 1
+        if max(color.redComponent, max(color.greenComponent, color.blueComponent)) < 0.70 { dark += 1 }
+    }
+}
+exit(total > 0 && Double(dark)/Double(total) > 0.003 ? 0 : 1)
+''')
+            for attempt in range(12):
+                run(['xcrun','simctl','io',SIMULATOR_UUID,'screenshot',str(raw)],'capture-'+label)
+                check=subprocess.run(['swift',str(checker),str(raw)],env=ENV,capture_output=True)
+                if check.returncode == 0: break
+                if check.returncode != 1: raise ValueError('Native rendered-image check failed.')
+                time.sleep(5)
+            else: raise ValueError('Native screen remained blank or loading.')
             run(['sips','-s','format','jpeg','-s','formatOptions','100',str(raw),'--out',str(target)],'opaque-native-image-'+label)
             dimensions=subprocess.run(['sips','-g','pixelWidth','-g','pixelHeight',str(target)],
                 env=ENV,capture_output=True,text=True,check=True).stdout
@@ -204,7 +231,7 @@ def capture_screenshots():
     STAGE='private-screenshot-backup'
     BACKUP_ID=private_backup.create_release(MODE)
     private_backup.store(BACKUP_ID,'binaries',[OUTPUT],KEY)
-    print('PASS: six-native-english-korean-screenshots-retained-privately',flush=True)
+    print('PASS: native-localized-screenshots-retained-privately',flush=True)
 
 def retain_and_upload(ipa):
     global STAGE,BACKUP_ID
